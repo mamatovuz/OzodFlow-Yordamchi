@@ -50,6 +50,11 @@ TEXT_MODEL = "gemini-2.5-flash-lite"
 AUDIO_MODEL = "gemini-2.5-flash"
 AUDIO_FALLBACK_MODEL = "gemini-2.5-flash-lite"
 TTS_MODEL = "gemini-2.5-flash-preview-tts"
+BAD_WORDS = {
+    "blya", "бля", "бляд", "suka", "сука", "нах", "нахуй", "xuy", "ху",
+    "pizda", "пизд", "dalbayob", "dalbaeb", "долба", "еб", "yeban",
+    "qotoq", "kot", "jalab", "haromi", "iflos", "padar", "lanat",
+}
 
 
 def jload(path):
@@ -103,6 +108,9 @@ def bot_settings(token):
         "business_connection_id": "",
         "can_manage_stories": False,
         "style_enabled": True,
+        "style_strength": "strict",
+        "voice_reply_mode": "text_and_voice",
+        "profanity_filter": True,
     }
     for key, value in defaults.items():
         if key not in settings:
@@ -156,8 +164,58 @@ def add_user(token, user):
     bs(token, "users", users)
 
 
+def set_user_age(token, user_id, age):
+    if not age or age < 1 or age > 120:
+        return
+    users = bl(token, "users")
+    uid = str(user_id)
+    users.setdefault(uid, {"user_id": user_id, "blocked": False})
+    users[uid]["age"] = age
+    users[uid]["age_updated"] = datetime.now().isoformat()
+    bs(token, "users", users)
+
+
+def get_user_age(token, user_id):
+    return bl(token, "users").get(str(user_id), {}).get("age")
+
+
+def extract_age(text):
+    if not text:
+        return None
+    patterns = [
+        r"\b(?:yoshim|yosh|менга|menga)\s*(\d{1,2})\b",
+        r"\b(\d{1,2})\s*(?:yosh|yoshda|ёш|лет)\b",
+        r"\b(?:i am|i'm)\s*(\d{1,2})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text.lower())
+        if match:
+            age = int(match.group(1))
+            if 1 <= age <= 99:
+                return age
+    return None
+
+
 def is_blocked(token, uid):
     return bl(token, "users").get(str(uid), {}).get("blocked", False)
+
+
+def has_bad_words(text):
+    text = (text or "").lower()
+    clean = re.sub(r"[^a-zа-яё0-9'`]+", " ", text)
+    words = clean.split()
+    for word in words:
+        if word in BAD_WORDS:
+            return True
+        if len(word) >= 4 and any(bad in word for bad in BAD_WORDS):
+            return True
+    return False
+
+
+def profanity_warning(age):
+    if isinstance(age, int):
+        return "Sokinmang." if age > 16 else "Sokinma."
+    return "Iltimos, sokinroq yozing."
 
 
 def find_reply(token, text):
@@ -292,6 +350,7 @@ def gemini_text_sync(api_key, prompt, user_text, history_text="", style_text="",
         "- Javob qisqa, insoniy va tabiiy bo'lsin.\n"
         "- Quyidagi uslub namunalariga juda yaqin yozing: so'z tanlashi, qisqalik, ohang, emoji ishlatish.\n"
         "- Uslub namunalaridagi shaxsiy yoki eski mavzularni javobda takrorlamang; faqat yozish uslubini oling.\n"
+        "- Uslub kuchi STRICT bo'lsa, javob uzunligi, ohangi va iboralari Ozodbeknikiga juda yaqin bo'lsin.\n"
         "- Savolga javob bergach, keraksiz 'yana nima yordam?' kabi savol bermang.\n"
         "- HTML teglari ishlatmang.\n\n"
         "Ozodbekning yozish uslubi namunalari:\n"
@@ -504,16 +563,21 @@ def create_user_bot(token: str, admin_id: int):
         ai_text = "AI: ON" if settings.get("ai_enabled") else "AI: OFF"
         voice_text = "Ovozli javob: ON" if settings.get("voice_reply") else "Ovozli javob: OFF"
         style_text = "Uslub: ON" if settings.get("style_enabled") else "Uslub: OFF"
+        mode_text = "Voice: matn+ovoz" if settings.get("voice_reply_mode") == "text_and_voice" else "Voice: faqat ovoz"
+        profanity_text = "So'kinish filter: ON" if settings.get("profanity_filter") else "So'kinish filter: OFF"
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=ai_text, callback_data="u_ai_toggle")],
             [InlineKeyboardButton(text="Gemini API key", callback_data="u_ai_key")],
             [InlineKeyboardButton(text="AI prompt", callback_data="u_ai_prompt")],
             [InlineKeyboardButton(text=style_text, callback_data="u_style_toggle")],
+            [InlineKeyboardButton(text=f"Uslub kuchi: {settings.get('style_strength', 'strict').upper()}", callback_data="u_style_strength")],
             [InlineKeyboardButton(text="Uslub namuna qo'shish", callback_data="u_style_add")],
             [InlineKeyboardButton(text="Uslubni tahlil qilish", callback_data="u_style_analyze")],
             [InlineKeyboardButton(text="Uslubni tozalash", callback_data="u_style_clear")],
             [InlineKeyboardButton(text="Fallback javob", callback_data="u_ai_fallback")],
             [InlineKeyboardButton(text=voice_text, callback_data="u_voice_toggle")],
+            [InlineKeyboardButton(text=mode_text, callback_data="u_voice_mode")],
+            [InlineKeyboardButton(text=profanity_text, callback_data="u_profanity_toggle")],
             [InlineKeyboardButton(text="AI test", callback_data="u_ai_test")],
             [InlineKeyboardButton(text="Orqaga", callback_data="u_back")],
         ])
@@ -617,6 +681,11 @@ def create_user_bot(token: str, admin_id: int):
 
         history_text = get_history_text(token, message.from_user.id)
         style_text = get_style_text(token) if settings.get("style_enabled") else ""
+        if style_text and settings.get("style_strength") == "strict":
+            style_text = (
+                "USLUB KUCHI: STRICT. Javob imkon qadar Ozodbekning real yozish ohangiga yaqin bo'lsin.\n"
+                f"{style_text}"
+            )
         add_history(token, message.from_user.id, "user", user_text)
         prepared_audio = audio_path
         prepared_mime = audio_mime
@@ -643,7 +712,9 @@ def create_user_bot(token: str, admin_id: int):
             extra = {}
             if bc_id:
                 extra["business_connection_id"] = bc_id
-            await ubot.send_message(message.chat.id, html.escape(answer), parse_mode="HTML", **extra)
+            voice_only = bool(audio_path) and settings.get("voice_reply_mode") == "voice_only" and settings.get("voice_reply")
+            if not voice_only:
+                await ubot.send_message(message.chat.id, html.escape(answer), parse_mode="HTML", **extra)
 
             if settings.get("voice_reply") and not bc_id:
                 await send_voice_answer(message.chat.id, api_key, answer, settings.get("tts_voice"))
@@ -706,6 +777,18 @@ def create_user_bot(token: str, admin_id: int):
         add_user(token, user)
 
         text = text_override or message.text or message.caption or ""
+        age = extract_age(text)
+        if age:
+            set_user_age(token, user.id, age)
+
+        if not text_override and bot_settings(token).get("profanity_filter") and has_bad_words(text):
+            warning = profanity_warning(get_user_age(token, user.id))
+            if bc_id:
+                await ubot.send_message(message.chat.id, warning, business_connection_id=bc_id)
+            else:
+                await message.answer(warning)
+            return
+
         manual = find_reply(token, text)
         if manual:
             await send_manual_reply(message.chat.id, manual, bc_id=bc_id)
@@ -1134,6 +1217,8 @@ def create_user_bot(token: str, admin_id: int):
         ai_status = "yoqilgan" if settings.get("ai_enabled") else "o'chirilgan"
         voice_status = "yoqilgan" if settings.get("voice_reply") else "o'chirilgan"
         style_status = "yoqilgan" if settings.get("style_enabled") else "o'chirilgan"
+        voice_mode = "matn + ovoz" if settings.get("voice_reply_mode") == "text_and_voice" else "faqat ovoz"
+        profanity_status = "yoqilgan" if settings.get("profanity_filter") else "o'chirilgan"
         style_count = len(bl(token, "style_samples").get("items", []))
         style_profile = bl(token, "style_profile")
         profile_status = "bor" if style_profile.get("text") else "hali yo'q"
@@ -1146,7 +1231,9 @@ def create_user_bot(token: str, admin_id: int):
             f"Gemini API key: <b>{html.escape(key_status)}</b>\n"
             f"AI auto-javob: <b>{ai_status}</b>\n"
             f"Ovozli javob: <b>{voice_status}</b>\n"
+            f"Voice rejim: <b>{voice_mode}</b>\n"
             f"Ozodbek uslubi: <b>{style_status}</b>\n"
+            f"So'kinish filter: <b>{profanity_status}</b>\n"
             f"Uslub namunalari: <b>{style_count}</b>\n\n"
             f"Uslub profili: <b>{profile_status}</b>{quota_text}\n\n"
             "Manual avto javob topilmasa, AI javob beradi. Uslub ON bo'lsa, javob Ozodbek yozgandek chiqadi."
@@ -1179,11 +1266,34 @@ def create_user_bot(token: str, admin_id: int):
         bs(token, "settings", settings)
         await u_cb_ai(call)
 
+    @udp.callback_query(F.data == "u_voice_mode")
+    async def u_cb_voice_mode(call: types.CallbackQuery):
+        settings = bot_settings(token)
+        current = settings.get("voice_reply_mode", "text_and_voice")
+        settings["voice_reply_mode"] = "voice_only" if current == "text_and_voice" else "text_and_voice"
+        bs(token, "settings", settings)
+        await u_cb_ai(call)
+
+    @udp.callback_query(F.data == "u_profanity_toggle")
+    async def u_cb_profanity_toggle(call: types.CallbackQuery):
+        settings = bot_settings(token)
+        settings["profanity_filter"] = not settings.get("profanity_filter")
+        bs(token, "settings", settings)
+        await u_cb_ai(call)
+
     @udp.callback_query(F.data == "u_style_toggle")
     async def u_cb_style_toggle(call: types.CallbackQuery):
         settings = bot_settings(token)
         settings["style_enabled"] = not settings.get("style_enabled")
         bs(token, "settings", settings)
+        await u_cb_ai(call)
+
+    @udp.callback_query(F.data == "u_style_strength")
+    async def u_cb_style_strength(call: types.CallbackQuery):
+        settings = bot_settings(token)
+        settings["style_strength"] = "strict"
+        bs(token, "settings", settings)
+        await call.answer("Uslub kuchi STRICT rejimda.")
         await u_cb_ai(call)
 
     @udp.callback_query(F.data == "u_style_add")
@@ -1286,7 +1396,8 @@ def create_user_bot(token: str, admin_id: int):
         for item in list(users.values())[-15:]:
             status = "blok" if item.get("blocked") else "aktiv"
             username = f"@{item['username']}" if item.get("username") else "-"
-            text += f"<b>{html.escape(item.get('full_name', ''))}</b> ({status})\n{username} | <code>{item.get('user_id')}</code>\n\n"
+            age = f" | yosh: {item.get('age')}" if item.get("age") else ""
+            text += f"<b>{html.escape(item.get('full_name', ''))}</b> ({status})\n{username} | <code>{item.get('user_id')}</code>{age}\n\n"
         await call.message.edit_text(text, parse_mode="HTML", reply_markup=back_kb())
 
     @udp.callback_query(F.data == "u_broadcast")
