@@ -1940,6 +1940,12 @@ async def stop_user_bot(token: str):
 
 
 async def main():
+    try:
+        from konkurs import start_konkurs_bot
+        asyncio.create_task(start_konkurs_bot())
+    except Exception as exc:
+        print(f"Konkurs bot yuklanmadi: {exc}")
+
     accounts = get_accounts()
     for acc in accounts.values():
         try:
