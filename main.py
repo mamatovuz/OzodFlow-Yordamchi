@@ -53,6 +53,7 @@ DEFAULT_FALLBACK = "Hozir operator javob beradi. Iltimos, biroz kuting."
 TEXT_MODEL = "gemini-2.5-flash-lite"
 AUDIO_MODEL = "gemini-2.5-flash"
 AUDIO_FALLBACK_MODEL = "gemini-2.5-flash-lite"
+STYLE_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
 TTS_MODEL = "gemini-2.5-flash-preview-tts"
 BAD_WORDS = {
     "blya", "бля", "бляд", "suka", "сука", "нах", "нахуй", "xuy", "ху",
@@ -434,6 +435,16 @@ def is_quota_error(exc):
     return "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower()
 
 
+def is_temporary_model_error(exc):
+    text = str(exc)
+    return (
+        "503" in text
+        or "UNAVAILABLE" in text
+        or "high demand" in text.lower()
+        or "overloaded" in text.lower()
+    )
+
+
 def quota_retry_seconds(exc, default=60):
     match = re.search(r"retryDelay['\"]?:\s*['\"]?(\d+)s", str(exc))
     if match:
@@ -456,16 +467,32 @@ def build_style_profile_sync(api_key, samples_text, old_profile=""):
         f"Namunalar:\n{samples_text[:12000]}\n\n"
         "Faqat uslub profilini yoz. 10-14 qator yetadi."
     )
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            max_output_tokens=450,
-            temperature=0.3,
-            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return (response.text or "").strip()
+    last_error = None
+    for model_name in STYLE_MODELS:
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        max_output_tokens=450,
+                        temperature=0.3,
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+                return (response.text or "").strip()
+            except Exception as exc:
+                last_error = exc
+                if is_temporary_model_error(exc):
+                    if attempt < 2:
+                        import time
+                        time.sleep(4 * (attempt + 1))
+                        continue
+                    break
+                if is_quota_error(exc):
+                    break
+                raise
+    raise last_error
 
 
 def parse_buttons(text):
