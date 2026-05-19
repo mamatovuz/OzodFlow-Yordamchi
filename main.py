@@ -33,10 +33,14 @@ master_dp = Dispatcher(storage=MemoryStorage())
 DATA_DIR = Path("data")
 BOTS_DIR = DATA_DIR / "bots"
 TMP_DIR = DATA_DIR / "tmp"
+MEDIA_DIR = DATA_DIR / "media"
+IMPORTS_DIR = DATA_DIR / "imports"
 ACCOUNTS_F = DATA_DIR / "accounts.json"
 
 BOTS_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_PROMPT = (
     "Siz Telegramda Ozodbek nomidan yozasiz. Hech qachon o'zingizni AI, bot, model yoki "
@@ -54,6 +58,15 @@ BAD_WORDS = {
     "blya", "бля", "бляд", "suka", "сука", "нах", "нахуй", "xuy", "ху",
     "pizda", "пизд", "dalbayob", "dalbaeb", "долба", "еб", "yeban",
     "qotoq", "kot", "jalab", "haromi", "iflos", "padar", "lanat",
+}
+MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".m4v"}
+MEDIA_REQUEST_WORDS = {
+    "rasm", "rasim", "surat", "foto", "photo", "kartinka", "video",
+    "tashaber", "tashlab", "tasha", "yubor", "jonat", "jo'nat", "ber",
+}
+MEDIA_STOPWORDS = MEDIA_REQUEST_WORDS | {
+    "shu", "mana", "manabu", "anavi", "iltimos", "menga", "meni", "ni", "ga",
+    "qilib", "kerak", "bor", "bo'lsa", "bolsa", "papka", "papkaga", "kirib",
 }
 
 
@@ -101,6 +114,8 @@ def bot_settings(token):
         "welcome": "Assalomu alaykum, <b>{name}</b>! Savolingizni yozing, men yordam beraman.",
         "ai_enabled": False,
         "gemini_api_key": "",
+        "gemini_backup_keys": [],
+        "gemini_active_key": 0,
         "ai_prompt": DEFAULT_PROMPT,
         "ai_fallback": DEFAULT_FALLBACK,
         "voice_reply": False,
@@ -127,6 +142,36 @@ def hide_key(key):
     if len(key) <= 10:
         return "***"
     return f"{key[:6]}...{key[-4:]}"
+
+
+def get_gemini_keys(settings):
+    keys = []
+    primary = (settings.get("gemini_api_key") or "").strip()
+    if primary:
+        keys.append(primary)
+    for key in settings.get("gemini_backup_keys") or []:
+        key = (key or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def get_active_gemini_key(settings):
+    keys = get_gemini_keys(settings)
+    if not keys:
+        return ""
+    index = int(settings.get("gemini_active_key", 0) or 0)
+    if index < 0 or index >= len(keys):
+        index = 0
+    return keys[index]
+
+
+def set_active_gemini_key(token, key):
+    settings = bot_settings(token)
+    keys = get_gemini_keys(settings)
+    if key in keys:
+        settings["gemini_active_key"] = keys.index(key)
+        bs(token, "settings", settings)
 
 
 def inc_stat(token, key, amount=1):
@@ -218,6 +263,36 @@ def profanity_warning(age):
     return "Iltimos, sokinroq yozing."
 
 
+def media_words(text):
+    text = (text or "").lower()
+    text = re.sub(r"[^a-zа-яё0-9'`]+", " ", text)
+    return [word for word in text.split() if word]
+
+
+def wants_media(text):
+    words = set(media_words(text))
+    return bool(words & MEDIA_REQUEST_WORDS) and bool(words & {"rasm", "rasim", "surat", "foto", "photo", "kartinka", "video"})
+
+
+def find_media_file(text):
+    words = [word for word in media_words(text) if word not in MEDIA_STOPWORDS and len(word) > 1]
+    files = [path for path in MEDIA_DIR.rglob("*") if path.is_file() and path.suffix.lower() in MEDIA_EXTENSIONS]
+    if not files:
+        return None
+    if not words:
+        return files[0]
+
+    best_path = None
+    best_score = 0
+    for path in files:
+        name = re.sub(r"[^a-zа-яё0-9'`]+", " ", path.stem.lower())
+        score = sum(1 for word in words if word in name)
+        if score > best_score:
+            best_score = score
+            best_path = path
+    return best_path if best_score else None
+
+
 def find_reply(token, text):
     if not text:
         return None
@@ -281,6 +356,77 @@ def get_style_text(token):
 def clear_style_samples(token):
     bs(token, "style_samples", {"items": []})
     bs(token, "style_profile", {})
+
+
+def import_dir(token):
+    path = IMPORTS_DIR / token.replace(":", "_")[:20]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def normalize_plain_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text", "")))
+        return "".join(parts)
+    return ""
+
+
+def extract_messages_from_json(data, owner_names):
+    messages = []
+    if isinstance(data, dict) and isinstance(data.get("chats"), dict):
+        for chat in data["chats"].get("list", []):
+            messages.extend(extract_messages_from_json(chat, owner_names))
+        return messages
+
+    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+        for item in data["messages"]:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            sender = str(item.get("from") or item.get("from_id") or "").lower()
+            if owner_names and not any(name in sender for name in owner_names):
+                continue
+            text = normalize_plain_text(item.get("text", "")).strip()
+            if text:
+                messages.append(text)
+    return messages
+
+
+def extract_messages_from_html(content):
+    rows = re.findall(
+        r'<div class="message default clearfix[^"]*".*?</div>\s*</div>\s*</div>',
+        content,
+        flags=re.S | re.I,
+    )
+    messages = []
+    for row in rows:
+        text_match = re.search(r'<div class="text">(.*?)</div>', row, flags=re.S | re.I)
+        if not text_match:
+            continue
+        text = re.sub(r"<br\s*/?>", "\n", text_match.group(1), flags=re.I)
+        text = re.sub(r"<.*?>", "", text)
+        text = html.unescape(text).strip()
+        if text:
+            messages.append(text)
+    return messages
+
+
+def parse_chat_export(path, owner_names):
+    path = Path(path)
+    suffix = path.suffix.lower()
+    content = path.read_text(encoding="utf-8", errors="ignore")
+    if suffix == ".json":
+        data = json.loads(content)
+        return extract_messages_from_json(data, owner_names)
+    if suffix in {".html", ".htm"}:
+        return extract_messages_from_html(content)
+    raise ValueError("Faqat .json yoki .html Telegram export fayl qabul qilinadi")
 
 
 def is_quota_error(exc):
@@ -518,7 +664,9 @@ def create_user_bot(token: str, admin_id: int):
         ai_prompt = State()
         ai_fallback = State()
         ai_test = State()
+        backup_keys = State()
         style_sample = State()
+        style_import = State()
         story_media = State()
 
     def main_kb():
@@ -568,9 +716,11 @@ def create_user_bot(token: str, admin_id: int):
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=ai_text, callback_data="u_ai_toggle")],
             [InlineKeyboardButton(text="Gemini API key", callback_data="u_ai_key")],
+            [InlineKeyboardButton(text="Zaxira Gemini keylar", callback_data="u_backup_keys")],
             [InlineKeyboardButton(text="AI prompt", callback_data="u_ai_prompt")],
             [InlineKeyboardButton(text=style_text, callback_data="u_style_toggle")],
             [InlineKeyboardButton(text=f"Uslub kuchi: {settings.get('style_strength', 'strict').upper()}", callback_data="u_style_strength")],
+            [InlineKeyboardButton(text="Chat import yuklash", callback_data="u_style_import")],
             [InlineKeyboardButton(text="Uslub namuna qo'shish", callback_data="u_style_add")],
             [InlineKeyboardButton(text="Uslubni tahlil qilish", callback_data="u_style_analyze")],
             [InlineKeyboardButton(text="Uslubni tozalash", callback_data="u_style_clear")],
@@ -640,7 +790,7 @@ def create_user_bot(token: str, admin_id: int):
 
     async def rebuild_style_profile(silent=True):
         settings = bot_settings(token)
-        api_key = settings.get("gemini_api_key", "").strip()
+        api_key = get_active_gemini_key(settings)
         samples = bl(token, "style_samples").get("items", [])
         if not api_key or len(samples) < 3:
             return False
@@ -673,8 +823,8 @@ def create_user_bot(token: str, admin_id: int):
 
     async def send_ai_response(message, user_text, bc_id=None, audio_path=None, audio_mime=None):
         settings = bot_settings(token)
-        api_key = settings.get("gemini_api_key", "").strip()
-        if not settings.get("ai_enabled") or not api_key:
+        api_keys = get_gemini_keys(settings)
+        if not settings.get("ai_enabled") or not api_keys:
             if not bc_id:
                 await message.answer(settings.get("ai_fallback") or DEFAULT_FALLBACK)
             return
@@ -694,16 +844,35 @@ def create_user_bot(token: str, admin_id: int):
                 prepared_audio, converted_mime = await asyncio.to_thread(convert_input_audio, audio_path)
                 if converted_mime:
                     prepared_mime = converted_mime
-            answer = await asyncio.to_thread(
-                gemini_text_sync,
-                api_key,
-                settings.get("ai_prompt") or DEFAULT_PROMPT,
-                user_text,
-                history_text,
-                style_text,
-                prepared_audio,
-                prepared_mime,
-            )
+            answer = ""
+            last_quota_error = None
+            last_error = None
+            active_key = ""
+            start_index = int(settings.get("gemini_active_key", 0) or 0)
+            ordered_keys = api_keys[start_index:] + api_keys[:start_index]
+            for api_key in ordered_keys:
+                try:
+                    answer = await asyncio.to_thread(
+                        gemini_text_sync,
+                        api_key,
+                        settings.get("ai_prompt") or DEFAULT_PROMPT,
+                        user_text,
+                        history_text,
+                        style_text,
+                        prepared_audio,
+                        prepared_mime,
+                    )
+                    active_key = api_key
+                    set_active_gemini_key(token, api_key)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if is_quota_error(exc):
+                        last_quota_error = exc
+                        continue
+                    raise
+            if not answer and last_error:
+                raise last_quota_error or last_error
             if not answer:
                 answer = settings.get("ai_fallback") or DEFAULT_FALLBACK
             add_history(token, message.from_user.id, "assistant", answer)
@@ -717,7 +886,7 @@ def create_user_bot(token: str, admin_id: int):
                 await ubot.send_message(message.chat.id, html.escape(answer), parse_mode="HTML", **extra)
 
             if settings.get("voice_reply") and not bc_id:
-                await send_voice_answer(message.chat.id, api_key, answer, settings.get("tts_voice"))
+                await send_voice_answer(message.chat.id, active_key or api_keys[0], answer, settings.get("tts_voice"))
         except Exception as exc:
             print(f"Gemini xatosi: {exc}")
             retry_after = remember_quota_error(exc) if is_quota_error(exc) else None
@@ -789,6 +958,24 @@ def create_user_bot(token: str, admin_id: int):
                 await message.answer(warning)
             return
 
+        if not text_override and wants_media(text):
+            media_path = find_media_file(text)
+            if media_path:
+                try:
+                    extra = {}
+                    if bc_id:
+                        extra["business_connection_id"] = bc_id
+                    if media_path.suffix.lower() in {".mp4", ".mov", ".m4v"}:
+                        await ubot.send_video(message.chat.id, FSInputFile(media_path), **extra)
+                    else:
+                        await ubot.send_photo(message.chat.id, FSInputFile(media_path), **extra)
+                    return
+                except Exception as exc:
+                    print(f"Media yuborish xatosi: {exc}")
+            elif not bc_id:
+                await message.answer("Bu rasm media kutubxonadan topilmadi.")
+                return
+
         manual = find_reply(token, text)
         if manual:
             await send_manual_reply(message.chat.id, manual, bc_id=bc_id)
@@ -834,6 +1021,13 @@ def create_user_bot(token: str, admin_id: int):
     async def u_media_msg(message: types.Message, state: FSMContext):
         current_state = await state.get_state()
         if message.from_user.id == admin_id and current_state in {St.rmedia.state, St.story_media.state}:
+            await u_admin_input(message, state)
+            return
+        await process_msg(message, state=state)
+
+    @udp.message(F.document)
+    async def u_document_msg(message: types.Message, state: FSMContext):
+        if message.from_user.id == admin_id and await state.get_state() == St.style_import:
             await u_admin_input(message, state)
             return
         await process_msg(message, state=state)
@@ -1027,9 +1221,26 @@ def create_user_bot(token: str, admin_id: int):
             if value.lower() in {"off", "ochirish", "delete"}:
                 value = ""
             settings["gemini_api_key"] = value
+            settings["gemini_active_key"] = 0
             bs(token, "settings", settings)
             await state.clear()
             await message.answer(f"Gemini API key saqlandi: <b>{hide_key(value)}</b>", parse_mode="HTML", reply_markup=ai_kb())
+        elif cur == St.backup_keys:
+            settings = bot_settings(token)
+            text_value = message.text.strip()
+            if text_value.lower() in {"off", "ochirish", "delete", "clear", "tozalash"}:
+                keys = []
+            else:
+                keys = []
+                for line in text_value.replace(",", "\n").splitlines():
+                    key = line.strip()
+                    if key and key != settings.get("gemini_api_key") and key not in keys:
+                        keys.append(key)
+            settings["gemini_backup_keys"] = keys
+            settings["gemini_active_key"] = 0
+            bs(token, "settings", settings)
+            await state.clear()
+            await message.answer(f"Zaxira keylar saqlandi: <b>{len(keys)}</b> ta", parse_mode="HTML", reply_markup=ai_kb())
         elif cur == St.ai_prompt:
             settings = bot_settings(token)
             settings["ai_prompt"] = message.text.strip()
@@ -1050,7 +1261,7 @@ def create_user_bot(token: str, admin_id: int):
             try:
                 answer = await asyncio.to_thread(
                     gemini_text_sync,
-                    settings.get("gemini_api_key", ""),
+                    get_active_gemini_key(settings),
                     settings.get("ai_prompt") or DEFAULT_PROMPT,
                     message.text,
                     fake_history,
@@ -1079,6 +1290,65 @@ def create_user_bot(token: str, admin_id: int):
                 parse_mode="HTML",
                 reply_markup=ai_kb(),
             )
+        elif cur == St.style_import:
+            if not message.document:
+                await message.answer("Telegram export faylini document qilib yuboring: .json yoki .html", reply_markup=back_kb())
+                return
+            file_name = message.document.file_name or "telegram_export"
+            suffix = Path(file_name).suffix.lower()
+            if suffix not in {".json", ".html", ".htm"}:
+                await message.answer("Faqat .json yoki .html fayl qabul qilinadi.", reply_markup=back_kb())
+                return
+            dest = import_dir(token) / f"{int(datetime.now().timestamp())}_{file_name}"
+            wait_msg = await message.answer("Chat export yuklanmoqda va analiz qilinmoqda...")
+            try:
+                file = await ubot.get_file(message.document.file_id)
+                await ubot.download_file(file.file_path, destination=dest)
+                owner_names = {
+                    (message.from_user.full_name or "").lower(),
+                    (message.from_user.username or "").lower(),
+                    "ozodbek",
+                }
+                owner_names = {name for name in owner_names if name}
+                imported = await asyncio.to_thread(parse_chat_export, dest, owner_names)
+                if not imported:
+                    await wait_msg.edit_text(
+                        "Fayldan Ozodbek yozgan matnli xabar topilmadi.\n"
+                        "Agar .html export bo'lsa, kerakli chat export qilinganini tekshiring.",
+                        reply_markup=ai_kb(),
+                    )
+                    await state.clear()
+                    return
+                sample_count = 0
+                for text_item in imported[:2000]:
+                    sample_count = add_style_sample(token, text_item) or sample_count
+                ok = await rebuild_style_profile(silent=False)
+                imports = bl(token, "imports")
+                imports[str(int(datetime.now().timestamp()))] = {
+                    "file": str(dest),
+                    "messages": len(imported),
+                    "used": min(len(imported), 2000),
+                    "profile_updated": ok,
+                    "created": datetime.now().isoformat(),
+                }
+                bs(token, "imports", imports)
+                await wait_msg.edit_text(
+                    f"Import tayyor.\n\n"
+                    f"Topilgan xabarlar: <b>{len(imported)}</b>\n"
+                    f"Uslubga qo'shildi: <b>{min(len(imported), 2000)}</b>\n"
+                    f"Jami namuna: <b>{sample_count}</b>\n"
+                    f"Profil: <b>{'yangilandi' if ok else 'keyinroq analiz qiling'}</b>",
+                    parse_mode="HTML",
+                    reply_markup=ai_kb(),
+                )
+            except Exception as exc:
+                await wait_msg.edit_text(
+                    f"Import xatosi:\n<code>{html.escape(str(exc)[:700])}</code>",
+                    parse_mode="HTML",
+                    reply_markup=ai_kb(),
+                )
+            finally:
+                await state.clear()
         elif cur == St.story_media:
             settings = bot_settings(token)
             business_connection_id = settings.get("business_connection_id", "")
@@ -1214,6 +1484,8 @@ def create_user_bot(token: str, admin_id: int):
     async def u_cb_ai(call: types.CallbackQuery):
         settings = bot_settings(token)
         key_status = hide_key(settings.get("gemini_api_key", ""))
+        key_count = len(get_gemini_keys(settings))
+        active_key = hide_key(get_active_gemini_key(settings))
         ai_status = "yoqilgan" if settings.get("ai_enabled") else "o'chirilgan"
         voice_status = "yoqilgan" if settings.get("voice_reply") else "o'chirilgan"
         style_status = "yoqilgan" if settings.get("style_enabled") else "o'chirilgan"
@@ -1229,6 +1501,8 @@ def create_user_bot(token: str, admin_id: int):
         text = (
             "<b>AI sozlamalar</b>\n\n"
             f"Gemini API key: <b>{html.escape(key_status)}</b>\n"
+            f"Jami Gemini key: <b>{key_count}</b>\n"
+            f"Ishlayotgan key: <b>{html.escape(active_key)}</b>\n"
             f"AI auto-javob: <b>{ai_status}</b>\n"
             f"Ovozli javob: <b>{voice_status}</b>\n"
             f"Voice rejim: <b>{voice_mode}</b>\n"
@@ -1249,7 +1523,7 @@ def create_user_bot(token: str, admin_id: int):
     @udp.callback_query(F.data == "u_ai_toggle")
     async def u_cb_ai_toggle(call: types.CallbackQuery):
         settings = bot_settings(token)
-        if not settings.get("gemini_api_key"):
+        if not get_gemini_keys(settings):
             await call.answer("Avval Gemini API key kiriting.", show_alert=True)
             return
         settings["ai_enabled"] = not settings.get("ai_enabled")
@@ -1259,7 +1533,7 @@ def create_user_bot(token: str, admin_id: int):
     @udp.callback_query(F.data == "u_voice_toggle")
     async def u_cb_voice_toggle(call: types.CallbackQuery):
         settings = bot_settings(token)
-        if not settings.get("gemini_api_key"):
+        if not get_gemini_keys(settings):
             await call.answer("Avval Gemini API key kiriting.", show_alert=True)
             return
         settings["voice_reply"] = not settings.get("voice_reply")
@@ -1307,6 +1581,19 @@ def create_user_bot(token: str, admin_id: int):
             reply_markup=back_kb(),
         )
 
+    @udp.callback_query(F.data == "u_style_import")
+    async def u_cb_style_import(call: types.CallbackQuery, state: FSMContext):
+        await state.set_state(St.style_import)
+        await call.message.edit_text(
+            "<b>Chat import yuklash</b>\n\n"
+            "Telegram Desktop export faylini document qilib yuboring.\n"
+            "Qabul qilinadi: <code>.json</code>, <code>.html</code>\n\n"
+            "Fayl bot papkasida ham saqlanadi:\n"
+            "<code>data/imports/</code>",
+            parse_mode="HTML",
+            reply_markup=back_kb(),
+        )
+
     @udp.callback_query(F.data == "u_style_clear")
     async def u_cb_style_clear(call: types.CallbackQuery):
         clear_style_samples(token)
@@ -1331,6 +1618,21 @@ def create_user_bot(token: str, admin_id: int):
         await call.message.edit_text(
             "<b>Gemini API key yuboring</b>\n\n"
             "O'chirish uchun <code>off</code> yozing.",
+            parse_mode="HTML",
+            reply_markup=back_kb(),
+        )
+
+    @udp.callback_query(F.data == "u_backup_keys")
+    async def u_cb_backup_keys(call: types.CallbackQuery, state: FSMContext):
+        settings = bot_settings(token)
+        keys = settings.get("gemini_backup_keys") or []
+        preview = "\n".join(f"{idx + 1}. {hide_key(key)}" for idx, key in enumerate(keys)) or "yo'q"
+        await state.set_state(St.backup_keys)
+        await call.message.edit_text(
+            "<b>Zaxira Gemini API keylar</b>\n\n"
+            f"Hozir: \n{html.escape(preview)}\n\n"
+            "Yangi zaxira keylarni har birini yangi qatorda yuboring.\n"
+            "Hammasini tozalash uchun <code>clear</code> yozing.",
             parse_mode="HTML",
             reply_markup=back_kb(),
         )
@@ -1360,7 +1662,7 @@ def create_user_bot(token: str, admin_id: int):
     @udp.callback_query(F.data == "u_ai_test")
     async def u_cb_ai_test(call: types.CallbackQuery, state: FSMContext):
         settings = bot_settings(token)
-        if not settings.get("gemini_api_key"):
+        if not get_gemini_keys(settings):
             await call.answer("Avval Gemini API key kiriting.", show_alert=True)
             return
         await state.set_state(St.ai_test)
