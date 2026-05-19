@@ -85,6 +85,16 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
+def pid_is_running(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def user_title(item):
     name = item.get("full_name") or "User"
     username = item.get("username")
@@ -151,13 +161,16 @@ def join_url():
     return "https://t.me/"
 
 
-def menu_kb():
+def menu_kb(admin=False):
+    keyboard = [
+        [KeyboardButton(text="🔗 Mening havolam"), KeyboardButton(text="👥 Referallarim")],
+        [KeyboardButton(text="🎁 Sovg'a"), KeyboardButton(text="🏆 Reyting")],
+        [KeyboardButton(text="ℹ️ Qoidalar")],
+    ]
+    if admin:
+        keyboard.append([KeyboardButton(text="🛠 Admin")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔗 Mening havolam"), KeyboardButton(text="👥 Referallarim")],
-            [KeyboardButton(text="🎁 Sovg'a"), KeyboardButton(text="🏆 Reyting")],
-            [KeyboardButton(text="ℹ️ Qoidalar")],
-        ],
+        keyboard=keyboard,
         resize_keyboard=True,
         input_field_placeholder="Konkurs menyusi",
     )
@@ -187,19 +200,31 @@ def sub_kb():
 def admin_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📢 Majburiy kanal"), KeyboardButton(text="🎁 Sovg'a")],
-            [KeyboardButton(text="🖼 Sovg'a rasmi"), KeyboardButton(text="📅 Konkurs vaqti")],
-            [KeyboardButton(text="⏸ Status/Pauza"), KeyboardButton(text="🏆 Random g'olib")],
-            [KeyboardButton(text="✍️ Qo'lda g'olib"), KeyboardButton(text="🔎 User qidirish")],
-            [KeyboardButton(text="➕ Referal +/-"), KeyboardButton(text="📝 Post generator")],
-            [KeyboardButton(text="🔥 Daily TOP"), KeyboardButton(text="🛡 Anti-fake")],
+            [KeyboardButton(text="📢 Majburiy kanal"), KeyboardButton(text="🎁 Sovg'a joylash")],
+            [KeyboardButton(text="⏸ Status/Pauza"), KeyboardButton(text="✍️ Qo'lda g'olib")],
+            [KeyboardButton(text="🔎 User qidirish"), KeyboardButton(text="📝 Post generator")],
             [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="📤 Reklama")],
-            [KeyboardButton(text="🚫 User bloklash"), KeyboardButton(text="🔄 Reset")],
-            [KeyboardButton(text="🛠 Admin")],
+            [KeyboardButton(text="🚫 User bloklash"), KeyboardButton(text="🛠 Admin")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Admin panel",
     )
+
+
+def status_kb():
+    is_active = settings().get("status") == "active"
+    text = "⏸ Pause" if is_active else "▶️ Active"
+    action = "status_pause" if is_active else "status_active"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text, callback_data=action)],
+    ])
+
+
+def status_text():
+    is_active = settings().get("status") == "active"
+    label = "🟢 Online" if is_active else "🔴 Offline"
+    hint = "Hozir konkurs ishlayapti." if is_active else "Hozir konkurs pauzada."
+    return f"⏸ Status/Pauza\n\nHolati: <b>{label}</b>\n{hint}"
 
 
 class AdminSt(StatesGroup):
@@ -477,7 +502,7 @@ async def start_konkurs_bot():
             old_pid = int(LOCK_F.read_text(encoding="utf-8").strip() or "0")
         except Exception:
             old_pid = 0
-        if old_pid and old_pid != os.getpid():
+        if old_pid and old_pid != os.getpid() and pid_is_running(old_pid):
             print("Konkurs bot allaqachon ishga tushgan bo'lishi mumkin. LOCK topildi.")
             return None
     LOCK_F.write_text(str(os.getpid()), encoding="utf-8")
@@ -496,8 +521,23 @@ async def start_konkurs_bot():
         if len(parts) > 1:
             arg = parts[1].strip()
         await register_user(message, inviter_id=arg if arg.isdigit() else None)
+        if await is_subscribed(bot, message.from_user.id):
+            ok, info = await confirm_subscription(bot, message.from_user)
+            if not ok:
+                await message.answer(info, reply_markup=sub_kb())
+                return
+            joined_text = (
+                f"✅ Siz konkursga {html.escape(info)} havolasi orqali qo'shildingiz."
+                if info else
+                "✅ Siz allaqachon obuna bo'lgansiz. Konkurs menyusi tayyor."
+            )
+            await message.answer(
+                f"{joined_text}\n\n🎯 Do'stlaringizni taklif qiling va imkoniyatingizni oshiring.",
+                reply_markup=menu_kb(is_admin(message.from_user.id)),
+            )
+            return
         await message.answer(
-            "🎁 Xush kelibsiz!\n\nKonkursda qatnashing va sovg'a yutib oling.",
+            "🎁 Xush kelibsiz!\n\nKonkursda qatnashish uchun avval kanalga obuna bo'ling.",
             reply_markup=sub_kb(),
         )
 
@@ -581,13 +621,13 @@ async def start_konkurs_bot():
             await call.message.answer(
                 f"✅ Siz konkursga {html.escape(info)} havolasi orqali qo'shildingiz.\n\n"
                 "🎯 Endi imkoniyatingizni oshirish uchun do'stlaringizni taklif qiling.",
-                reply_markup=menu_kb(),
+                reply_markup=menu_kb(is_admin(call.from_user.id)),
             )
         else:
             await call.message.answer(
                 "✅ Siz konkursga muvaffaqiyatli qo'shildingiz.\n\n"
                 "🎯 Endi imkoniyatingizni oshirish uchun do'stlaringizni taklif qiling.",
-                reply_markup=menu_kb(),
+                reply_markup=menu_kb(is_admin(call.from_user.id)),
             )
         await call.answer()
 
@@ -618,7 +658,7 @@ async def start_konkurs_bot():
 
     @dp.callback_query(F.data == "back_menu")
     async def back_menu(call: types.CallbackQuery):
-        await call.message.answer("🎉 Menu", reply_markup=menu_kb())
+        await call.message.answer("🎉 Menu", reply_markup=menu_kb(is_admin(call.from_user.id)))
         await call.answer()
 
     @dp.message(F.text.in_({"🔗 Mening havolam", "Mening havolam"}))
@@ -649,7 +689,10 @@ async def start_konkurs_bot():
             await message.answer("📢 Kanal username/id yuboring.\nMasalan: @kanal yoki -100... | invite_link")
         elif action == "prize":
             await state.set_state(AdminSt.prize_title)
-            await message.answer("🎁 Sovg'a nomini yuboring.\nMasalan: iPhone 15 Pro")
+            await message.answer(
+                "🎁 Sovg'a joylash boshlandi.\n\n"
+                "1/4. Sovg'a nomini yuboring.\nMasalan: iPhone 15 Pro"
+            )
         elif action == "photo":
             await state.set_state(AdminSt.photo)
             await message.answer("🖼 Sovg'a rasmini yuboring.")
@@ -657,10 +700,7 @@ async def start_konkurs_bot():
             await state.set_state(AdminSt.time)
             await message.answer("📅 Tugash vaqtini yuboring.\nFormat: 2026-05-28 20:00")
         elif action == "status":
-            s = settings()
-            s["status"] = "paused" if s.get("status") == "active" else "active"
-            save_json(SETTINGS_F, s)
-            await message.answer(f"⏸ Status: {s['status']}", reply_markup=admin_kb())
+            await message.answer(status_text(), parse_mode="HTML", reply_markup=status_kb())
         elif action == "winner":
             winner = await draw_winner(bot, manual=True)
             await message.answer("🏆 G'olib tanlandi." if winner else "Qatnashchi yo'q.", reply_markup=admin_kb())
@@ -711,21 +751,17 @@ async def start_konkurs_bot():
 
     ADMIN_TEXT_ACTIONS = {
         "📢 Majburiy kanal": "channel",
+        "🎁 Sovg'a joylash": "prize",
         "🎁 Sovg'a": "prize",
         "🖼 Sovg'a rasmi": "photo",
         "📅 Konkurs vaqti": "time",
         "⏸ Status/Pauza": "status",
-        "🏆 Random g'olib": "winner",
         "✍️ Qo'lda g'olib": "manual_winner",
         "🔎 User qidirish": "find_user",
-        "➕ Referal +/-": "ref_adjust",
         "📝 Post generator": "post",
-        "🔥 Daily TOP": "daily_top",
-        "🛡 Anti-fake": "antifake",
         "📊 Statistika": "stats",
         "📤 Reklama": "broadcast",
         "🚫 User bloklash": "block",
-        "🔄 Reset": "reset",
         "🛠 Admin": "admin",
     }
 
@@ -737,6 +773,17 @@ async def start_konkurs_bot():
             return
         await open_admin_action(message, state, action)
 
+    @dp.callback_query(F.data.in_({"status_pause", "status_active"}))
+    async def status_toggle(call: types.CallbackQuery):
+        if not is_admin(call.from_user.id):
+            await call.answer()
+            return
+        s = settings()
+        s["status"] = "paused" if call.data == "status_pause" else "active"
+        save_json(SETTINGS_F, s)
+        await call.message.edit_text(status_text(), parse_mode="HTML", reply_markup=status_kb())
+        await call.answer("Status yangilandi.")
+
     @dp.callback_query(F.data.startswith("a_"))
     async def admin_callbacks(call: types.CallbackQuery, state: FSMContext):
         if not is_admin(call.from_user.id):
@@ -747,7 +794,11 @@ async def start_konkurs_bot():
             await call.message.edit_text("Kanal username/id yuboring. Masalan: @kanal yoki -100...")
         elif action == "a_prize":
             await state.set_state(AdminSt.prize_title)
-            await call.message.edit_text("🎁 Sovg'a nomini yuboring.\nMasalan: iPhone 15 Pro")
+            await call.message.answer(
+                "🎁 Sovg'a joylash boshlandi.\n\n"
+                "1/4. Sovg'a nomini yuboring.\nMasalan: iPhone 15 Pro",
+                reply_markup=admin_kb(),
+            )
         elif action == "a_photo":
             await state.set_state(AdminSt.photo)
             await call.message.edit_text("Sovg'a rasmini yuboring.")
@@ -755,13 +806,10 @@ async def start_konkurs_bot():
             await state.set_state(AdminSt.time)
             await call.message.edit_text("Tugash vaqtini yuboring.\nFormat: 2026-05-28 20:00")
         elif action == "a_status":
-            s = settings()
-            s["status"] = "paused" if s.get("status") == "active" else "active"
-            save_json(SETTINGS_F, s)
-            await call.message.edit_text(f"Status: {s['status']}", reply_markup=admin_kb())
+            await call.message.answer(status_text(), parse_mode="HTML", reply_markup=status_kb())
         elif action == "a_winner":
             winner = await draw_winner(bot, manual=True)
-            await call.message.edit_text("G'olib tanlandi." if winner else "G'olib tanlash uchun qatnashchi yo'q.", reply_markup=admin_kb())
+            await call.message.answer("G'olib tanlandi." if winner else "G'olib tanlash uchun qatnashchi yo'q.", reply_markup=admin_kb())
         elif action == "a_manual_winner":
             await state.set_state(AdminSt.manual_winner)
             await call.message.edit_text("G'olib qilish uchun user ID yoki @username yuboring.")
@@ -772,7 +820,7 @@ async def start_konkurs_bot():
             await state.set_state(AdminSt.ref_adjust)
             await call.message.edit_text("Format: user_id +5 yoki @username -2")
         elif action == "a_post":
-            await call.message.edit_text(contest_post_text(), reply_markup=admin_kb())
+            await call.message.answer(contest_post_text(), reply_markup=admin_kb())
         elif action == "a_daily_top":
             items = top_users(10)
             text = "TOP referallar\n\n"
@@ -780,16 +828,16 @@ async def start_konkurs_bot():
                 text += "Hali ma'lumot yo'q."
             for index, item in enumerate(items, 1):
                 text += f"{index}. {html.escape(user_title(item))} - {ref_count(item)}\n"
-            await call.message.edit_text(text, reply_markup=admin_kb())
+            await call.message.answer(text, reply_markup=admin_kb())
         elif action == "a_antifake":
             removed = await refresh_subscriptions(bot)
-            await call.message.edit_text(f"Tekshirildi. Obunadan chiqqanlar: {removed}", reply_markup=admin_kb())
+            await call.message.answer(f"Tekshirildi. Obunadan chiqqanlar: {removed}", reply_markup=admin_kb())
         elif action == "a_stats":
             data = users()
             total = len(data)
             subscribed = sum(1 for u in data.values() if u.get("subscribed"))
             refs = sum(len(u.get("referrals", [])) for u in data.values())
-            await call.message.edit_text(
+            await call.message.answer(
                 f"Statistika\n\nJami users: {total}\nObuna bo'lganlar: {subscribed}\nReferallar: {refs}\nStatus: {settings().get('status')}",
                 reply_markup=admin_kb(),
             )
@@ -805,7 +853,8 @@ async def start_konkurs_bot():
             s["winner_id"] = ""
             s["winner_time"] = ""
             save_json(SETTINGS_F, s)
-            await call.message.edit_text("Konkurs reset qilindi.", reply_markup=admin_kb())
+            await call.message.answer("Konkurs reset qilindi.", reply_markup=admin_kb())
+        await call.answer()
 
     @dp.message(AdminSt.channel)
     async def set_channel(message: types.Message, state: FSMContext):
@@ -830,23 +879,27 @@ async def start_konkurs_bot():
         s["prize_title"] = message.text.strip()
         save_json(SETTINGS_F, s)
         await state.set_state(AdminSt.prize_desc)
-        await message.answer("📝 Endi sovg'a description yozing.\nMasalan: Yangi, 256GB, natural titanium.")
+        await message.answer("📝 2/4. Endi sovg'a description yozing.\nMasalan: Yangi, 256GB, natural titanium.")
 
     @dp.message(AdminSt.prize_desc)
     async def set_prize_desc(message: types.Message, state: FSMContext):
         s = settings()
         s["prize_text"] = message.text.strip()
         save_json(SETTINGS_F, s)
-        await state.clear()
-        await message.answer("🎁 Sovg'a nomi va description saqlandi.", reply_markup=admin_kb())
+        await state.set_state(AdminSt.photo)
+        await message.answer("🖼 3/4. Endi sovg'a rasmini yuboring.")
 
     @dp.message(AdminSt.photo, F.photo)
     async def set_photo(message: types.Message, state: FSMContext):
         s = settings()
         s["prize_photo"] = message.photo[-1].file_id
         save_json(SETTINGS_F, s)
-        await state.clear()
-        await message.answer("Sovg'a rasmi saqlandi.", reply_markup=admin_kb())
+        await state.set_state(AdminSt.time)
+        await message.answer("📅 4/4. Konkurs tugash vaqtini yuboring.\nFormat: 2026-05-28 20:00")
+
+    @dp.message(AdminSt.photo)
+    async def photo_required(message: types.Message):
+        await message.answer("🖼 Iltimos, sovg'a rasmini oddiy foto qilib yuboring.")
 
     @dp.message(AdminSt.time)
     async def set_time(message: types.Message, state: FSMContext):
@@ -861,7 +914,7 @@ async def start_konkurs_bot():
         s["winner_time"] = ""
         save_json(SETTINGS_F, s)
         await state.clear()
-        await message.answer("Konkurs vaqti saqlandi.", reply_markup=admin_kb())
+        await message.answer("✅ Sovg'a to'liq saqlandi va konkurs vaqti belgilandi.", reply_markup=admin_kb())
 
     @dp.message(AdminSt.broadcast)
     async def broadcast(message: types.Message, state: FSMContext):

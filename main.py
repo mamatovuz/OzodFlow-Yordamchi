@@ -1866,6 +1866,9 @@ async def master_get_token(message: types.Message, state: FSMContext):
     if ":" not in token or len(token) < 30:
         await message.answer("Token noto'g'ri.\nFormat: <code>123456:AAH...</code>", parse_mode="HTML")
         return
+    if token == MASTER_TOKEN:
+        await message.answer("Bu master bot tokeni. Iltimos, alohida user bot tokenini yuboring.")
+        return
     await message.answer("Token tekshirilmoqda...")
     try:
         tb = Bot(token=token)
@@ -1902,6 +1905,9 @@ async def master_get_token(message: types.Message, state: FSMContext):
 
 
 async def start_user_bot(token: str, admin_id: int):
+    if token == MASTER_TOKEN:
+        print("User bot tokeni MASTER_TOKEN bilan bir xil. Bu bot ishga tushirilmadi.")
+        return
     if token in running_bots:
         await stop_user_bot(token)
     ubot, udp = create_user_bot(token, admin_id)
@@ -1950,6 +1956,9 @@ async def main():
     accounts = get_accounts()
     for acc in accounts.values():
         try:
+            if acc.get("token") == MASTER_TOKEN:
+                print("Saqlangan user bot MASTER_TOKEN bilan bir xil. O'tkazib yuborildi.")
+                continue
             bot_settings(acc["token"])
             await start_user_bot(acc["token"], acc["admin_id"])
         except Exception as exc:
