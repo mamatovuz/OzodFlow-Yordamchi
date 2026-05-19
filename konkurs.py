@@ -16,10 +16,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-KONKURS_TOKEN = ("KONKURS_TOKEN", "8672277904:AAG1tBnP4D8c3D3wxika9bYUjo2f5kwGCQM").strip()
+KONKURS_TOKEN = os.getenv("KONKURS_TOKEN", "").strip()
 ADMIN_IDS = {
     int(x.strip())
-    for x in ("KONKURS_ADMIN_IDS", "7903688837").replace(" ", "").split(",")
+    for x in os.getenv("KONKURS_ADMIN_IDS", "").replace(" ", "").split(",")
     if x.strip().isdigit()
 }
 
@@ -317,6 +317,7 @@ async def start_konkurs_bot():
 
     bot = Bot(KONKURS_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+    await bot.delete_webhook(drop_pending_updates=True)
 
     @dp.message(Command("start"))
     async def start(message: types.Message):

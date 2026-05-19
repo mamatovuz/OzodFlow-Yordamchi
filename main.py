@@ -23,7 +23,7 @@ from google.genai import types as genai_types
 
 load_dotenv()
 
-MASTER_TOKEN = ("8883531040:AAEYrBOr7zv2ilVog9KFbqmucYOKJiqCIDw")
+MASTER_TOKEN = os.getenv("MASTER_TOKEN", "").strip()
 if not MASTER_TOKEN:
     raise RuntimeError("MASTER_TOKEN .env faylida topilmadi")
 
@@ -1905,6 +1905,7 @@ async def start_user_bot(token: str, admin_id: int):
     if token in running_bots:
         await stop_user_bot(token)
     ubot, udp = create_user_bot(token, admin_id)
+    await ubot.delete_webhook(drop_pending_updates=True)
 
     async def run():
         try:
@@ -1954,6 +1955,7 @@ async def main():
         except Exception as exc:
             print(f"Bot yuklanmadi: {exc}")
     print(f"Master bot ishga tushdi. Yuklangan botlar: {len(accounts)}")
+    await master_bot.delete_webhook(drop_pending_updates=True)
     await master_dp.start_polling(master_bot, allowed_updates=["message", "callback_query"])
 
 
