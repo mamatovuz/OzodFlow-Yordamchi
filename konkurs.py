@@ -51,6 +51,7 @@ def settings():
     defaults = {
         "channel": "",
         "channel_url": "",
+        "prize_title": "",
         "prize_text": "Sovg'a hali sozlanmagan.",
         "prize_photo": "",
         "end_time": "",
@@ -113,9 +114,12 @@ async def announce_to_channel(bot, text, photo=None):
 def contest_post_text():
     s = settings()
     end = s.get("end_time") or "Belgilanmagan"
+    prize_title = s.get("prize_title") or "Sovg'a"
+    prize_desc = s.get("prize_text") or ""
     return (
-        "Konkurs!\n\n"
-        f"Sovg'a: {s.get('prize_text')}\n"
+        "🎁 Konkurs!\n\n"
+        f"Sovg'a: {prize_title}\n"
+        f"{prize_desc}\n\n"
         f"Tugash vaqti: {end}\n\n"
         "Qatnashish uchun botga kiring, kanalga obuna bo'ling va do'stlaringizni taklif qiling."
     )
@@ -191,6 +195,7 @@ def admin_kb():
             [KeyboardButton(text="🔥 Daily TOP"), KeyboardButton(text="🛡 Anti-fake")],
             [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="📤 Reklama")],
             [KeyboardButton(text="🚫 User bloklash"), KeyboardButton(text="🔄 Reset")],
+            [KeyboardButton(text="🛠 Admin")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Admin panel",
@@ -199,7 +204,8 @@ def admin_kb():
 
 class AdminSt(StatesGroup):
     channel = State()
-    prize = State()
+    prize_title = State()
+    prize_desc = State()
     photo = State()
     time = State()
     broadcast = State()
@@ -540,12 +546,14 @@ async def start_konkurs_bot():
     async def show_prize(message_or_call):
         s = settings()
         end = s.get("end_time") or "Belgilanmagan"
-        text = f"🎁 Joriy sovg'a:\n{s.get('prize_text')}\n\n📅 Konkurs tugash vaqti:\n{end}"
+        title = s.get("prize_title") or "Sovg'a"
+        desc = s.get("prize_text") or ""
+        text = f"🎁 Joriy sovg'a:\n<b>{html.escape(title)}</b>\n\n{html.escape(desc)}\n\n📅 Konkurs tugash vaqti:\n{end}"
         target = message_or_call.message if isinstance(message_or_call, types.CallbackQuery) else message_or_call
         if s.get("prize_photo"):
-            await target.answer_photo(s["prize_photo"], caption=text)
+            await target.answer_photo(s["prize_photo"], caption=text, parse_mode="HTML")
         else:
-            await target.answer(text)
+            await target.answer(text, parse_mode="HTML")
 
     async def show_rules(message_or_call):
         text = (
@@ -640,8 +648,8 @@ async def start_konkurs_bot():
             await state.set_state(AdminSt.channel)
             await message.answer("📢 Kanal username/id yuboring.\nMasalan: @kanal yoki -100... | invite_link")
         elif action == "prize":
-            await state.set_state(AdminSt.prize)
-            await message.answer("🎁 Sovg'a matnini yuboring.")
+            await state.set_state(AdminSt.prize_title)
+            await message.answer("🎁 Sovg'a nomini yuboring.\nMasalan: iPhone 15 Pro")
         elif action == "photo":
             await state.set_state(AdminSt.photo)
             await message.answer("🖼 Sovg'a rasmini yuboring.")
@@ -718,11 +726,16 @@ async def start_konkurs_bot():
         "📤 Reklama": "broadcast",
         "🚫 User bloklash": "block",
         "🔄 Reset": "reset",
+        "🛠 Admin": "admin",
     }
 
     @dp.message(F.text.in_(set(ADMIN_TEXT_ACTIONS.keys())))
     async def admin_reply_buttons(message: types.Message, state: FSMContext):
-        await open_admin_action(message, state, ADMIN_TEXT_ACTIONS[message.text])
+        action = ADMIN_TEXT_ACTIONS[message.text]
+        if action == "admin":
+            await message.answer("🛠 Admin panel\n\nKerakli bo'limni tanlang.", reply_markup=admin_kb())
+            return
+        await open_admin_action(message, state, action)
 
     @dp.callback_query(F.data.startswith("a_"))
     async def admin_callbacks(call: types.CallbackQuery, state: FSMContext):
@@ -733,8 +746,8 @@ async def start_konkurs_bot():
             await state.set_state(AdminSt.channel)
             await call.message.edit_text("Kanal username/id yuboring. Masalan: @kanal yoki -100...")
         elif action == "a_prize":
-            await state.set_state(AdminSt.prize)
-            await call.message.edit_text("Sovg'a matnini yuboring.")
+            await state.set_state(AdminSt.prize_title)
+            await call.message.edit_text("🎁 Sovg'a nomini yuboring.\nMasalan: iPhone 15 Pro")
         elif action == "a_photo":
             await state.set_state(AdminSt.photo)
             await call.message.edit_text("Sovg'a rasmini yuboring.")
@@ -811,13 +824,21 @@ async def start_konkurs_bot():
         await state.clear()
         await message.answer("Kanal saqlandi.", reply_markup=admin_kb())
 
-    @dp.message(AdminSt.prize)
-    async def set_prize(message: types.Message, state: FSMContext):
+    @dp.message(AdminSt.prize_title)
+    async def set_prize_title(message: types.Message, state: FSMContext):
         s = settings()
-        s["prize_text"] = message.text
+        s["prize_title"] = message.text.strip()
+        save_json(SETTINGS_F, s)
+        await state.set_state(AdminSt.prize_desc)
+        await message.answer("📝 Endi sovg'a description yozing.\nMasalan: Yangi, 256GB, natural titanium.")
+
+    @dp.message(AdminSt.prize_desc)
+    async def set_prize_desc(message: types.Message, state: FSMContext):
+        s = settings()
+        s["prize_text"] = message.text.strip()
         save_json(SETTINGS_F, s)
         await state.clear()
-        await message.answer("Sovg'a saqlandi.", reply_markup=admin_kb())
+        await message.answer("🎁 Sovg'a nomi va description saqlandi.", reply_markup=admin_kb())
 
     @dp.message(AdminSt.photo, F.photo)
     async def set_photo(message: types.Message, state: FSMContext):
