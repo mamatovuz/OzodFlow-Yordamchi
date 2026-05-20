@@ -16,10 +16,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-KONKURS_TOKEN = os.getenv("KONKURS_TOKEN", "").strip()
+KONKURS_TOKEN = ("KONKURS_TOKEN", "8672277904:AAG1tBnP4D8c3D3wxika9bYUjo2f5kwGCQM").strip()
 ADMIN_IDS = {
     int(x.strip())
-    for x in os.getenv("KONKURS_ADMIN_IDS", "").replace(" ", "").split(",")
+    for x in ("KONKURS_ADMIN_IDS", "7903688837").replace(" ", "").split(",")
     if x.strip().isdigit()
 }
 
